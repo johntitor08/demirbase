@@ -549,7 +549,6 @@ input[type=file]{display:none;}
 <div class="modal-overlay" id="loanModal">
   <div class="loan-modal">
     <div class="modal-title" id="loanModalTitle">Ödünç Ver</div>
-    <input type="hidden" id="loanAssetId">
     <div id="loanActiveWrap" style="display:none;margin-bottom:16px">
       <div style="font-size:12px;font-weight:600;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Şu An Ödünçte</div>
       <div class="detail-active-loan">
@@ -568,7 +567,7 @@ input[type=file]{display:none;}
     </div>
     <div style="margin-top:20px">
       <div style="font-size:12px;font-weight:600;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Geçmiş</div>
-      <div class="loan-history" id="loanHistory"><div class="loan-empty">Henüz ödünç kaydı yok.</div></div>
+      <div class="loan-history" id="loanHistory"></div>
     </div>
     <div class="modal-actions" style="margin-top:20px">
       <button class="btn-modal" onclick="closeModal('loanModal')">Kapat</button>
@@ -761,17 +760,9 @@ function subscribeAssets(){
   unsubAssets=db.collection('users').doc(currentUser.uid).collection('assets')
     .orderBy('createdAt','desc')
     .onSnapshot(function(snap){
-      var assets=snap.docs.map(function(d){return Object.assign({id:d.id},d.data());});
-      // Her asset için aktif ödünç kaydını çek
-      var promises=assets.map(function(a){
-        return db.collection('users').doc(currentUser.uid).collection('assets').doc(a.id)
-          .collection('loans').where('returnedAt','==',null).limit(1).get()
-          .then(function(ls){if(!ls.empty){a.activeLoan=Object.assign({loanId:ls.docs[0].id},ls.docs[0].data());}})
-          .catch(function(){});
-      });
-      Promise.all(promises).then(function(){
-        allAssets=assets;applyFilters();loadStats();
-      });
+      // activeLoan asset dokümanında denormalize tutulur; ek sorgu gerekmez
+      allAssets=snap.docs.map(function(d){return Object.assign({id:d.id},d.data());});
+      applyFilters();loadStats();
     },function(err){
       document.getElementById('assetGrid').innerHTML='<div class="empty-state"><div class="empty-icon">⚠</div><h3>Hata</h3><p>'+esc(err.message)+'</p></div>';
     });
@@ -958,14 +949,28 @@ function saveEdit(){
 var currentLoanAssetId=null;
 
 function loanCol(assetId){
-  return db.collection('users').doc(currentUser.uid).collection('assets').doc(assetId).collection('loans');
+  return assetDoc(assetId).collection('loans');
+}
+function assetDoc(assetId){
+  return db.collection('users').doc(currentUser.uid).collection('assets').doc(assetId);
+}
+
+// Tek bir ödünç kaydını HTML olarak render eder (geçmiş listesi için)
+function renderLoanEntry(l){
+  var isActive=!l.returnedAt;
+  return '<div class="loan-entry'+(isActive?' active':'')+'"><div class="loan-entry-header">'
+    +'<span class="loan-person">👤 '+esc(l.person)+'</span>'
+    +'<span class="loan-status-badge '+(isActive?'out':'returned')+'">'+(isActive?'Ödünçte':'İade Edildi')+'</span>'
+    +'</div><div class="loan-dates">'
+    +'<span>📤 '+fmtDate(l.loanedAt)+'</span>'
+    +(l.returnedAt?'<span>📥 '+fmtDate(l.returnedAt)+'</span>':'')
+    +'</div></div>';
 }
 
 function openLoanModal(assetId){
   currentLoanAssetId=assetId;
   var asset=getAssetById(assetId);
-  document.getElementById('loanModalTitle').textContent=(asset?esc(asset.name)+' — ':'')+'Ödünç';
-  document.getElementById('loanAssetId').value=assetId;
+  document.getElementById('loanModalTitle').textContent=(asset?asset.name+' — ':'')+'Ödünç';
   document.getElementById('loanPersonInput').value='';
   document.getElementById('loanDateInput').value=new Date().toISOString().slice(0,10);
   document.getElementById('loanModal').classList.add('open');
@@ -978,9 +983,8 @@ function refreshLoanModal(assetId){
   var histEl=document.getElementById('loanHistory');
   histEl.innerHTML='<div class="loan-empty">Yükleniyor...</div>';
   loanCol(assetId).orderBy('loanedAt','desc').get().then(function(snap){
-    var active=null,history=[];
-    snap.docs.forEach(function(d){var l=Object.assign({loanId:d.id},d.data());if(!l.returnedAt)active=l;else history.push(l);});
-    // Active loan area
+    var entries=snap.docs.map(function(d){return Object.assign({loanId:d.id},d.data());});
+    var active=entries.filter(function(l){return !l.returnedAt;})[0]||null;
     if(active){
       activeWrap.style.display='';
       document.getElementById('loanActivePerson').textContent=active.person;
@@ -990,83 +994,55 @@ function refreshLoanModal(assetId){
       activeWrap.style.display='none';
       formWrap.style.display='';
     }
-    // History
-    var returned=snap.docs.map(function(d){return Object.assign({loanId:d.id},d.data());}).filter(function(l){return !!l.returnedAt;});
-    if(!active&&!returned.length){histEl.innerHTML='<div class="loan-empty">Henüz ödünç kaydı yok.</div>';return;}
-    var allEntries=(active?[active]:[]).concat(returned);
-    histEl.innerHTML=allEntries.map(function(l){
-      var isActive=!l.returnedAt;
-      return '<div class="loan-entry'+(isActive?' active':'')+'"><div class="loan-entry-header">'
-        +'<span class="loan-person">👤 '+esc(l.person)+'</span>'
-        +'<span class="loan-status-badge '+(isActive?'out':'returned')+'">'+(isActive?'Ödünçte':'İade Edildi')+'</span>'
-        +'</div><div class="loan-dates">'
-        +'<span>📤 '+fmtDate(l.loanedAt)+'</span>'
-        +(l.returnedAt?'<span>📥 '+fmtDate(l.returnedAt)+'</span>':'')
-        +'</div></div>';
-    }).join('');
+    if(!entries.length){histEl.innerHTML='<div class="loan-empty">Henüz ödünç kaydı yok.</div>';return;}
+    histEl.innerHTML=entries.map(renderLoanEntry).join('');
   }).catch(function(e){histEl.innerHTML='<div class="loan-empty" style="color:var(--danger)">Hata: '+esc(e.message)+'</div>';});
 }
 
 function saveLoan(){
-  var assetId=document.getElementById('loanAssetId').value;
+  var assetId=currentLoanAssetId;
   var person=document.getElementById('loanPersonInput').value.trim();
   var dateVal=document.getElementById('loanDateInput').value;
   if(!person){showToast('Kişi adı giriniz!',true);return;}
   var btn=document.getElementById('loanSaveBtn');btn.disabled=true;btn.innerHTML='<span class="spinner"></span>';
-  var loanedAt=dateVal?firebase.firestore.Timestamp.fromDate(new Date(dateVal)):firebase.firestore.FieldValue.serverTimestamp();
-  loanCol(assetId).add({person:person,loanedAt:loanedAt,returnedAt:null})
-    .then(function(ref){
+  // Daima gerçek bir Timestamp sakla (sentinel değeri fmtDate'i bozar)
+  var loanedAt=firebase.firestore.Timestamp.fromDate(dateVal?new Date(dateVal):new Date());
+  var loanRef=loanCol(assetId).doc();
+  var batch=db.batch();
+  batch.set(loanRef,{person:person,loanedAt:loanedAt,returnedAt:null});
+  batch.update(assetDoc(assetId),{activeLoan:{loanId:loanRef.id,person:person,loanedAt:loanedAt}});
+  batch.commit()
+    .then(function(){
       showToast('"'+person+'" adına ödünç kaydedildi!');
-      var a=allAssets.find(function(x){return x.id===assetId;});
-      if(a)a.activeLoan={loanId:ref.id,person:person,loanedAt:loanedAt};
-      applyFilters();
       refreshLoanModal(assetId);
     })
     .catch(function(e){showToast('Hata: '+e.message,true);})
     .finally(function(){btn.disabled=false;btn.textContent='Ödünç Ver';});
 }
 
-function returnLoan(){
-  var assetId=currentLoanAssetId;
+// returnLoan ve quickReturn için ortak iade mantığı
+function returnAsset(assetId,onDone){
   var asset=getAssetById(assetId);
-  if(!asset||!asset.activeLoan)return;
-  function doReturn(loanId){
-    loanCol(assetId).doc(loanId).update({returnedAt:firebase.firestore.FieldValue.serverTimestamp()})
-      .then(function(){
-        showToast('İade alındı!');
-        var a=allAssets.find(function(x){return x.id===assetId;});
-        if(a)delete a.activeLoan;
-        applyFilters();
-        refreshLoanModal(assetId);
-      })
+  if(!asset||!asset.activeLoan){showToast('Aktif ödünç bulunamadı.',true);return;}
+  var person=asset.activeLoan.person;
+  function finish(loanId){
+    var batch=db.batch();
+    batch.update(loanCol(assetId).doc(loanId),{returnedAt:firebase.firestore.FieldValue.serverTimestamp()});
+    batch.update(assetDoc(assetId),{activeLoan:firebase.firestore.FieldValue.delete()});
+    batch.commit()
+      .then(function(){showToast('"'+person+'" iade aldı!');if(onDone)onDone();})
       .catch(function(e){showToast('Hata: '+e.message,true);});
   }
-  if(asset.activeLoan.loanId){doReturn(asset.activeLoan.loanId);}
+  if(asset.activeLoan.loanId){finish(asset.activeLoan.loanId);}
   else{
     loanCol(assetId).where('returnedAt','==',null).limit(1).get()
-      .then(function(s){if(!s.empty)doReturn(s.docs[0].id);else showToast('Aktif ödünç bulunamadı.',true);})
+      .then(function(s){if(!s.empty)finish(s.docs[0].id);else showToast('Aktif ödünç bulunamadı.',true);})
       .catch(function(e){showToast('Hata: '+e.message,true);});
   }
 }
 
-function quickReturn(e,assetId){
-  e.stopPropagation();
-  var asset=getAssetById(assetId);if(!asset||!asset.activeLoan)return;
-  function doReturn(loanId){
-    loanCol(assetId).doc(loanId).update({returnedAt:firebase.firestore.FieldValue.serverTimestamp()})
-      .then(function(){
-        showToast('"'+asset.activeLoan.person+'" iade aldı!');
-        delete asset.activeLoan;applyFilters();
-      })
-      .catch(function(e){showToast('Hata: '+e.message,true);});
-  }
-  if(asset.activeLoan.loanId){doReturn(asset.activeLoan.loanId);}
-  else{
-    loanCol(assetId).where('returnedAt','==',null).limit(1).get()
-      .then(function(s){if(!s.empty)doReturn(s.docs[0].id);else showToast('Aktif ödünç bulunamadı.',true);})
-      .catch(function(e){showToast('Hata: '+e.message,true);});
-  }
-}
+function returnLoan(){returnAsset(currentLoanAssetId,function(){refreshLoanModal(currentLoanAssetId);});}
+function quickReturn(e,assetId){e.stopPropagation();returnAsset(assetId);}
 
 function loadDetailLoans(assetId){
   var el=document.getElementById('detailLoanContent');if(!el)return;
@@ -1078,18 +1054,11 @@ function loadDetailLoans(assetId){
       +'<div class="detail-active-loan-date">Verildi: '+fmtDate(asset.activeLoan.loanedAt)+'</div>'
       +'</div><button class="btn-return" onclick="quickReturn(event,\''+assetId+'\')" style="font-size:12px;padding:5px 14px">İade Al</button></div>';
   }
-  el.innerHTML=html||'';
+  el.innerHTML=html;
   loanCol(assetId).orderBy('loanedAt','desc').get().then(function(snap){
-    if(snap.empty&&!asset.activeLoan){el.innerHTML='<div class="loan-empty">Henüz ödünç kaydı yok.</div>';return;}
-    var entries=snap.docs.map(function(d){return Object.assign({loanId:d.id},d.data());});
-    var histHtml=entries.map(function(l){
-      var isActive=!l.returnedAt;
-      return '<div class="loan-entry'+(isActive?' active':'')+'"><div class="loan-entry-header">'
-        +'<span class="loan-person">👤 '+esc(l.person)+'</span>'
-        +'<span class="loan-status-badge '+(isActive?'out':'returned')+'">'+(isActive?'Ödünçte':'İade Edildi')+'</span>'
-        +'</div><div class="loan-dates"><span>📤 '+fmtDate(l.loanedAt)+'</span>'+(l.returnedAt?'<span>📥 '+fmtDate(l.returnedAt)+'</span>':'')+'</div></div>';
-    }).join('');
-    el.innerHTML=(html?html:'')+'<div class="loan-history">'+histHtml+'</div>';
+    if(snap.empty&&!(asset&&asset.activeLoan)){el.innerHTML='<div class="loan-empty">Henüz ödünç kaydı yok.</div>';return;}
+    var histHtml=snap.docs.map(function(d){return renderLoanEntry(Object.assign({loanId:d.id},d.data()));}).join('');
+    el.innerHTML=html+'<div class="loan-history">'+histHtml+'</div>';
   }).catch(function(){});
 }
 
